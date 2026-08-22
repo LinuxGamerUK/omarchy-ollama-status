@@ -71,20 +71,21 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     tooltipText: {
-      if (!ollama.installed) return "Ollama · Not installed"
-      if (!ollama.hasService) return "Ollama · No service · Click to install"
-      if (ollama.running) return "Ollama · Running"
-      return "Ollama · Stopped"
+      if (!ollama.installed) return "Ollama \u00b7 Not installed"
+      if (!ollama.hasService) return "Ollama \u00b7 No service"
+      if (ollama.running) return "Ollama \u00b7 Running"
+      return "Ollama \u00b7 Stopped"
     }
     iconComponent: Component {
       Item {
         Text {
           anchors.centerIn: parent
-          text: "󰚩"
+          text: "\u{F32A9}"
           color: root.barIconColor
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.bar.iconFont
           renderType: Text.NativeRendering
+          textFormat: Text.PlainText
 
           Behavior on color { ColorAnimation { duration: 240 } }
         }
@@ -93,10 +94,7 @@ BarWidget {
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
-      else if (buttonCode === Qt.RightButton) {
-        if (ollama.installed && !ollama.hasService) ollama.installService()
-        else ollama.toggleService()
-      }
+      else if (buttonCode === Qt.RightButton) ollama.toggleService()
       else if (buttonCode === Qt.MiddleButton) ollama.refresh()
     }
   }

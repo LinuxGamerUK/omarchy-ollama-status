@@ -37,7 +37,7 @@ Panel {
   }
   readonly property string toggleHint: {
     if (!ollama.installed) return ""
-    if (!ollama.hasService) return "Install service"
+    if (!ollama.hasService) return "See setup instructions below"
     if (ollama.running) return "Turn Ollama off"
     return "Turn Ollama on"
   }
@@ -68,7 +68,6 @@ Panel {
     function toggle(): void { root.toggle() }
     function startService(): string { ollama.startService(); return "ok" }
     function stopService(): string { ollama.stopService(); return "ok" }
-    function installService(): string { ollama.installService(); return "ok" }
     function refresh(): string { ollama.refresh(); return "ok" }
   }
 
@@ -91,10 +90,7 @@ Panel {
         if (dx !== 0 && root.focusSection === "header") root.moveCursor(dx)
       }
       onActivateRequested: {
-        if (root.cursorActive && root.focusSection === "header") {
-          if (ollama.installed && !ollama.hasService) ollama.installService()
-          else ollama.toggleService()
-        }
+        if (root.cursorActive && root.focusSection === "header") ollama.toggleService()
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -160,17 +156,6 @@ Panel {
                 fontFamily: root.fontFamily
               }
             }
-
-            PanelActionButton {
-              id: installButton
-              visible: ollama.installed && !ollama.hasService && !ollama.busy
-              iconText: "▶"
-              tooltipText: "Install and enable systemd service"
-              foreground: Color.accent
-              fontFamily: root.fontFamily
-              Layout.alignment: Qt.AlignVCenter
-              onClicked: ollama.installService()
-            }
           }
 
           Column {
@@ -209,10 +194,11 @@ Panel {
         Text {
           visible: ollama.lastError !== ""
           width: parent.width
-          text: ollama.lastError
+          text: ollama.sanitize(ollama.lastError)
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
+          textFormat: Text.PlainText
           wrapMode: Text.WordWrap
         }
 
@@ -233,6 +219,7 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+            textFormat: Text.PlainText
             wrapMode: Text.WordWrap
           }
         }
@@ -250,10 +237,11 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             anchors.margins: Style.space(12)
-            text: "Ollama is installed but has no systemd service.\nClick the install button above to create and enable one."
+            text: "Ollama is installed but has no systemd service.\nSet one up with:\n\nsudo systemctl enable ollama\n\nSee the README for a unit file if none is packaged."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+            textFormat: Text.PlainText
             wrapMode: Text.WordWrap
           }
         }
@@ -278,7 +266,7 @@ Panel {
 
             InfoLabel { text: "Version" }
             InfoValue {
-              text: ollama.ollamaVersion || "—"
+              text: ollama.sanitize(ollama.ollamaVersion) || "\u2014"
             }
 
             InfoLabel {
@@ -288,7 +276,7 @@ Panel {
             InfoValue {
               visible: ollama.running
               text: {
-                if (!ollama.apiReachable) return "—"
+                if (!ollama.apiReachable) return "\u2014"
                 return ollama.apiLatencyMs >= 0 ? ollama.apiLatencyMs + " ms" : "Reachable"
               }
               color: {
@@ -305,7 +293,7 @@ Panel {
             }
             InfoValue {
               visible: ollama.running && ollama.activeSince !== ""
-              text: ollama.activeSince ? ollama.activeSince.replace(/^\w+\s+/, "") : ""
+              text: ollama.activeSince ? ollama.sanitize(ollama.activeSince.replace(/^\w+\s+/, "")) : ""
             }
 
             InfoLabel {
@@ -325,7 +313,7 @@ Panel {
                 var parts = []
                 if (local > 0) parts.push(local + " local")
                 if (cloud > 0) parts.push(cloud + " cloud")
-                return parts.length > 0 ? parts.join(" · ") : "0"
+                return parts.length > 0 ? parts.join(" \u00b7 ") : "0"
               }
             }
           }
@@ -371,7 +359,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
-                    text: "󰚩"
+                    text: "\u{F32A9}"
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
@@ -384,10 +372,11 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: String(modelData.name || "Unknown")
+                      text: ollama.sanitize(modelData.name || "Unknown")
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
+                      textFormat: Text.PlainText
                       elide: Text.ElideRight
                     }
 
@@ -397,12 +386,13 @@ Panel {
                         var parts = []
                         if (modelData.size) parts.push(String(modelData.size))
                         if (modelData.processor) parts.push(String(modelData.processor))
-                        return parts.join(" · ")
+                        return ollama.sanitize(parts.join(" \u00b7 "))
                       }
                       visible: text !== ""
                       color: root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
+                      textFormat: Text.PlainText
                       elide: Text.ElideRight
                     }
                   }
@@ -453,11 +443,11 @@ Panel {
 
                   Text {
                     text: {
-                      if (modelData.isCloud) return "☁"
+                      if (modelData.isCloud) return "\u2601"
                       for (var i = 0; i < ollama.runningModels.length; i++) {
-                        if (String(ollama.runningModels[i].name) === String(modelData.name)) return "●"
+                        if (String(ollama.runningModels[i].name) === String(modelData.name)) return "\u25cf"
                       }
-                      return "○"
+                      return "\u25cb"
                     }
                     color: {
                       if (modelData.isCloud) return Color.accent
@@ -477,10 +467,11 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: String(modelData.name || "Unknown")
+                      text: ollama.sanitize(modelData.name || "Unknown")
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
+                      textFormat: Text.PlainText
                       elide: Text.ElideRight
                     }
 
@@ -491,12 +482,13 @@ Panel {
                         if (modelData.isCloud) parts.push("Cloud")
                         else if (modelData.size) parts.push(String(modelData.size))
                         if (modelData.modified) parts.push(String(modelData.modified))
-                        return parts.join(" \u00b7 ")
+                        return ollama.sanitize(parts.join(" \u00b7 "))
                       }
                       visible: text !== ""
                       color: root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
+                      textFormat: Text.PlainText
                       elide: Text.ElideRight
                     }
                   }
@@ -519,6 +511,7 @@ Panel {
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           horizontalAlignment: Text.AlignHCenter
         }
@@ -533,17 +526,18 @@ Panel {
     opacity: 0.6
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
+    textFormat: Text.PlainText
   }
 
   component InfoValue: Text {
     color: root.foreground
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
+    textFormat: Text.PlainText
   }
 
   // Keyboard cursor movement across sections
   function moveCursor(dy) {
     cursorActive = true
-    // Single-section panel: no vertical navigation needed beyond the switch
   }
 }

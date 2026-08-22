@@ -17,13 +17,14 @@ Item {
   property string lastError: ""
 
   // ── API health ─────────────────────────────────────────────────────
-  property bool apiReachable: false    // / endpoint responds
-  property int apiLatencyMs: -1        // response time in ms, -1 = unknown
+  property bool apiReachable: false
+  property int apiLatencyMs: -1
 
-  // ── Model info ────────────────────────────────────────────────────
-  property var models: []              // [{ name, id, size, modified, isCloud }]
-  property var runningModels: []       // [{ name, id, size, processor, context, until }]
-  property var cloudModels: []         // [{ name, family, parameterSize, capabilities }]
+  // ── Model info (bounded to maxModels) ──────────────────────────────
+  readonly property int maxModels: 50
+  readonly property int maxRunning: 10
+  property var models: []
+  property var runningModels: []
 
   // ── Service info ───────────────────────────────────────────────────
   property string activeSince: ""
@@ -43,6 +44,24 @@ Item {
     if (n < min) n = min
     if (n > max) n = max
     return n
+  }
+
+  // ── Sanitize external strings for safe display ──────────────────────
+  // Strip any markup-like characters so QML Text never interprets them.
+  function sanitize(str) {
+    return String(str || "").replace(/[<>&]/g, function(c) {
+      if (c === "<") return "&lt;"
+      if (c === ">") return "&gt;"
+      if (c === "&") return "&amp;"
+      return c
+    })
+  }
+
+  // Truncate a string to maxLen characters, appending "…" if truncated.
+  function truncate(str, maxLen) {
+    var s = String(str || "")
+    if (s.length <= maxLen) return s
+    return s.substring(0, maxLen) + "…"
   }
 
   function refresh() {
@@ -93,26 +112,18 @@ Item {
     else startService()
   }
 
-  function installService() {
-    if (busy || !installed || hasService) return
-    busy = true
-    actionLabel = "Installing service…"
-    lastError = ""
-    installProcess.running = true
-  }
-
-  // ── Parsers ────────────────────────────────────────────────────────
+  // ── Parsers (bounded) ──────────────────────────────────────────────
 
   function parseServiceStatus(raw) {
-    var lines = String(raw || "").trim().split("\n")
+    var lines = String(raw || "").trim().split("\n").slice(0, 20)
     var state = ""
     var subState = ""
     var since = ""
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
-      if (line.indexOf("ActiveState=") === 0) state = line.substring(12)
-      else if (line.indexOf("SubState=") === 0) subState = line.substring(9)
-      else if (line.indexOf("ActiveEnterTimestamp=") === 0) since = line.substring(21)
+      if (line.indexOf("ActiveState=") === 0) state = truncate(line.substring(12), 64)
+      else if (line.indexOf("SubState=") === 0) subState = truncate(line.substring(9), 64)
+      else if (line.indexOf("ActiveEnterTimestamp=") === 0) since = truncate(line.substring(21), 128)
     }
     running = (state === "active" && subState === "running")
     activeSince = since
@@ -121,14 +132,14 @@ Item {
   function parseModelList(raw) {
     var lines = String(raw || "").trim().split("\n")
     var result = []
-    for (var i = 1; i < lines.length; i++) {
+    for (var i = 1; i < lines.length && result.length < root.maxModels; i++) {
       var parts = lines[i].trim().split(/\s{2,}/)
       if (parts.length >= 4) {
         result.push({
-          name: parts[0] || "",
-          id: parts[1] || "",
-          size: parts[2] || "",
-          modified: parts.slice(3).join("  ") || "",
+          name: truncate(parts[0] || "", 128),
+          id: truncate(parts[1] || "", 64),
+          size: truncate(parts[2] || "", 32),
+          modified: truncate(parts.slice(3).join("  ") || "", 64),
           isCloud: false
         })
       }
@@ -143,16 +154,16 @@ Item {
   function parseRunningModels(raw) {
     var lines = String(raw || "").trim().split("\n")
     var result = []
-    for (var i = 1; i < lines.length; i++) {
+    for (var i = 1; i < lines.length && result.length < root.maxRunning; i++) {
       var parts = lines[i].trim().split(/\s{2,}/)
       if (parts.length >= 2) {
         result.push({
-          name: parts[0] || "",
-          id: parts[1] || "",
-          size: parts[2] || "",
-          processor: parts[3] || "",
-          context: parts[4] || "",
-          until: parts.slice(5).join("  ") || ""
+          name: truncate(parts[0] || "", 128),
+          id: truncate(parts[1] || "", 64),
+          size: truncate(parts[2] || "", 32),
+          processor: truncate(parts[3] || "", 32),
+          context: truncate(parts[4] || "", 32),
+          until: truncate(parts.slice(5).join("  ") || "", 64)
         })
       }
     }
@@ -164,31 +175,8 @@ Item {
     return n.indexOf(":cloud") !== -1 || n.indexOf(":server") !== -1
   }
 
-  function parseCloudModels(raw) {
-    try {
-      var data = JSON.parse(String(raw || "{}"))
-      var models = data.models || []
-      var result = []
-      for (var i = 0; i < models.length; i++) {
-        var m = models[i]
-        var details = m.details || {}
-        result.push({
-          name: m.name || m.model || "",
-          family: details.family || "",
-          parameterSize: details.parameter_size || "",
-          capabilities: details.capabilities || [],
-          modified: m.modified_at || ""
-        })
-      }
-      return result
-    } catch (e) {
-      return []
-    }
-  }
+  // ── Processes (bounded StdioCollectors) ────────────────────────────
 
-  // ── Processes ──────────────────────────────────────────────────────
-
-  // Check if ollama binary exists
   Process {
     id: whichProcess
     running: false
@@ -202,13 +190,11 @@ Item {
         root.running = false
         root.models = []
         root.runningModels = []
-        root.cloudModels = []
         root.apiReachable = false
       }
     }
   }
 
-  // Check if systemd unit file exists
   Process {
     id: checkServiceProcess
     running: false
@@ -217,7 +203,7 @@ Item {
       id: checkServiceStdout
       waitForEnd: true
       onStreamFinished: {
-        var output = String(text || "").trim()
+        var output = truncate(String(text || "").trim(), 512)
         root.hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
         if (root.hasService) {
           root.refresh()
@@ -231,7 +217,6 @@ Item {
     }
   }
 
-  // systemd service state
   Process {
     id: serviceProcess
     running: false
@@ -240,8 +225,7 @@ Item {
       id: serviceStdout
       waitForEnd: true
       onStreamFinished: {
-        root.parseServiceStatus(text)
-        // When running, also poll API health and models
+        root.parseServiceStatus(truncate(text, 2048))
         if (root.running) {
           root.refreshApi()
         } else {
@@ -260,7 +244,6 @@ Item {
     }
   }
 
-  // API health check — curl the root endpoint and measure latency
   Process {
     id: apiHealthProcess
     running: false
@@ -269,7 +252,8 @@ Item {
       id: apiHealthStdout
       waitForEnd: true
       onStreamFinished: {
-        var parts = String(text || "").trim().split(/\s+/)
+        var raw = truncate(String(text || "").trim(), 128)
+        var parts = raw.split(/\s+/)
         var code = parseInt(parts[0], 10)
         var latency = parseInt(parts[1], 10)
         root.apiReachable = (code === 200)
@@ -284,7 +268,6 @@ Item {
     }
   }
 
-  // ollama list — includes cloud models tagged :cloud etc.
   Process {
     id: listProcess
     running: false
@@ -292,71 +275,10 @@ Item {
     stdout: StdioCollector {
       id: listStdout
       waitForEnd: true
-      onStreamFinished: {
-        root.parseModelList(text)
-        // After listing local models, also fetch all models via API
-        // to discover cloud models that don't appear in `ollama list`
-        if (!apiModelsProcess.running) apiModelsProcess.running = true
-      }
+      onStreamFinished: root.parseModelList(truncate(text, 65536))
     }
   }
 
-  // Fetch all models via API (includes cloud models)
-  Process {
-    id: apiModelsProcess
-    running: false
-    command: ["curl", "-s", "--connect-timeout", "3", "--max-time", "10", "http://127.0.0.1:11434/v1/models"]
-    stdout: StdioCollector {
-      id: apiModelsStdout
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          var data = JSON.parse(String(text || "{}"))
-          var apiModels = data.data || []
-          // Find models that exist in the API but not in our local list
-          var localNames = {}
-          for (var i = 0; i < root.models.length; i++) {
-            localNames[root.models[i].name] = true
-          }
-          var newCloud = []
-          for (var j = 0; j < apiModels.length; j++) {
-            var m = apiModels[j]
-            var name = String(m.id || m.name || "")
-            if (name && !localNames[name]) {
-              newCloud.push({
-                name: name,
-                id: name,
-                size: "cloud",
-                modified: m.created ? String(m.created).split("T")[0] : "",
-                isCloud: true
-              })
-            }
-          }
-          // Merge cloud-only models into the main list
-          if (newCloud.length > 0) {
-            root.models = root.models.concat(newCloud)
-          }
-          // Track cloud model details separately
-          var cloudDetails = []
-          for (var k = 0; k < apiModels.length; k++) {
-            var am = apiModels[k]
-            cloudDetails.push({
-              name: String(am.id || am.name || ""),
-              family: "",
-              parameterSize: "",
-              capabilities: [],
-              modified: am.created ? String(am.created).split("T")[0] : ""
-            })
-          }
-          root.cloudModels = cloudDetails
-        } catch (e) {
-          // API not reachable or parse error — leave cloud models empty
-        }
-      }
-    }
-  }
-
-  // ollama ps (running models)
   Process {
     id: psProcess
     running: false
@@ -364,11 +286,10 @@ Item {
     stdout: StdioCollector {
       id: psStdout
       waitForEnd: true
-      onStreamFinished: root.parseRunningModels(text)
+      onStreamFinished: root.parseRunningModels(truncate(text, 16384))
     }
   }
 
-  // ollama version
   Process {
     id: versionProcess
     running: false
@@ -377,12 +298,11 @@ Item {
       id: versionStdout
       waitForEnd: true
       onStreamFinished: {
-        root.ollamaVersion = String(text || "").trim()
+        root.ollamaVersion = truncate(String(text || "").trim(), 128)
       }
     }
   }
 
-  // systemctl start ollama
   Process {
     id: startProcess
     running: false
@@ -397,7 +317,6 @@ Item {
     }
   }
 
-  // systemctl stop ollama
   Process {
     id: stopProcess
     running: false
@@ -407,24 +326,6 @@ Item {
       root.actionLabel = ""
       if (exitCode !== 0) {
         root.lastError = "Failed to stop Ollama"
-      }
-      root.refresh()
-    }
-  }
-
-  // Install systemd service
-  Process {
-    id: installProcess
-    running: false
-    command: ["bash", "-c", "sudo systemctl enable ollama 2>&1 || (sudo tee /etc/systemd/system/ollama.service > /dev/null << 'EOF\\n[Unit]\\nDescription=Ollama Service\\nAfter=network-online.target\\n\\n[Service]\\nExecStart=/usr/bin/ollama serve\\nWorkingDirectory=/var/lib/ollama\\nEnvironment=HOME=/var/lib/ollama\\nEnvironment=OLLAMA_MODELS=/var/lib/ollama\\nUser=ollama\\nGroup=ollama\\nRestart=on-failure\\nRestartSec=3\\nType=simple\\n\\n[Install]\\nWantedBy=multi-user.target\\nEOF\\nsudo systemctl daemon-reload && sudo systemctl enable ollama)"]
-    onExited: function(exitCode) {
-      root.busy = false
-      root.actionLabel = ""
-      if (exitCode !== 0) {
-        root.lastError = "Failed to install Ollama service"
-      } else {
-        root.hasService = true
-        root.lastError = ""
       }
       root.refresh()
     }
@@ -441,11 +342,14 @@ Item {
     onTriggered: root.refresh()
   }
 
-  // After start, poll API once service is likely up
   Timer {
     id: startDelay
     interval: 1500
     repeat: false
     onTriggered: root.refresh()
+  }
+
+  Component.onCompleted: {
+    whichProcess.running = true
   }
 }

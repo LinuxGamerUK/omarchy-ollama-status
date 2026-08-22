@@ -10,7 +10,8 @@ An Omarchy shell bar widget that shows the Ollama service status and lets you st
 - **Keyboard shortcuts**: `s` to start, `x` to stop, `r` to refresh
 - **Right-click** the bar icon to quickly toggle the service
 - **Middle-click** the bar icon to refresh status
-- Lists all pulled models and highlights which are currently loaded in VRAM
+- **API health check** with latency display (green <200ms, amber 200-500ms, red >500ms)
+- Lists all pulled models with cloud model detection
 
 ## Install
 
@@ -26,9 +27,20 @@ omarchy plugin add https://github.com/LinuxGamerUK/omarchy-ollama-status.git --e
 - **Middle-click** the bar icon to refresh status
 
 The panel shows:
-- Service status (running/stopped), uptime, and Ollama version
+- Service status (running/stopped), uptime, Ollama version, and API latency
 - Currently loaded models (in VRAM) with size and processor info
 - All available (pulled) models, with a dot indicator for loaded ones
+- Cloud models (tagged `:cloud`) shown with a ☁ icon
+
+## Service setup
+
+If Ollama is installed but the systemd service is missing, the panel shows setup instructions. To create and enable the service manually:
+
+```sh
+sudo systemctl enable ollama
+```
+
+If no unit file is packaged with your Ollama install, create one at `/etc/systemd/system/ollama.service` and then run `sudo systemctl daemon-reload && sudo systemctl enable ollama`.
 
 ## Configure
 
@@ -49,7 +61,7 @@ omarchy plugin remove com.github.linuxgameruk.ollama-status
 ## Requirements
 
 - [Ollama](https://ollama.com) installed and on PATH
-- systemd `ollama.service` for start/stop control (uses `sudo` for privilege escalation — requires passwordless sudo for systemctl, or configure Polkit for `pkexec`)
+- systemd `ollama.service` for start/stop control (uses `sudo` for privilege escalation)
 
 ## License
 
