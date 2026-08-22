@@ -47,9 +47,13 @@ BarWidget {
     settings: root.settings
   }
 
-  readonly property color barIconColor: ollama.running
-    ? (bar ? bar.barForeground : Color.foreground)
-    : (bar ? Qt.darker(bar.barForeground, 1.55) : Qt.darker(Color.foreground, 1.55))
+  readonly property color barIconColor: {
+    if (!ollama.installed || !ollama.hasService)
+      return bar ? Qt.darker(bar.barForeground, 2.0) : Qt.darker(Color.foreground, 2.0)
+    if (ollama.running)
+      return bar ? bar.barForeground : Color.foreground
+    return bar ? Qt.darker(bar.barForeground, 1.55) : Qt.darker(Color.foreground, 1.55)
+  }
 
   Loader {
     id: panelLoader
@@ -66,6 +70,12 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
+    tooltipText: {
+      if (!ollama.installed) return "Ollama · Not installed"
+      if (!ollama.hasService) return "Ollama · No service · Click to install"
+      if (ollama.running) return "Ollama · Running"
+      return "Ollama · Stopped"
+    }
     iconComponent: Component {
       Item {
         Text {
@@ -83,7 +93,10 @@ BarWidget {
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
-      else if (buttonCode === Qt.RightButton) ollama.toggleService()
+      else if (buttonCode === Qt.RightButton) {
+        if (ollama.installed && !ollama.hasService) ollama.installService()
+        else ollama.toggleService()
+      }
       else if (buttonCode === Qt.MiddleButton) ollama.refresh()
     }
   }

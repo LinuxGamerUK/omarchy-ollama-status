@@ -24,16 +24,23 @@ Panel {
   readonly property string statusText: {
     if (ollama.busy) return ollama.actionLabel
     if (!ollama.installed) return "Not installed"
+    if (!ollama.hasService) return "No service"
     if (ollama.running) return "Running"
     return "Stopped"
   }
   readonly property color statusColor: {
     if (ollama.busy) return foreground
     if (!ollama.installed) return urgent
+    if (!ollama.hasService) return urgent
     if (ollama.running) return Color.accent
     return dim
   }
-  readonly property string toggleHint: ollama.running ? "Turn Ollama off" : "Turn Ollama on"
+  readonly property string toggleHint: {
+    if (!ollama.installed) return ""
+    if (!ollama.hasService) return "Install service"
+    if (ollama.running) return "Turn Ollama off"
+    return "Turn Ollama on"
+  }
   property string focusSection: "header"
   property bool cursorActive: false
 
@@ -61,6 +68,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function startService(): string { ollama.startService(); return "ok" }
     function stopService(): string { ollama.stopService(); return "ok" }
+    function installService(): string { ollama.installService(); return "ok" }
     function refresh(): string { ollama.refresh(); return "ok" }
   }
 
@@ -83,7 +91,10 @@ Panel {
         if (dx !== 0 && root.focusSection === "header") root.moveCursor(dx)
       }
       onActivateRequested: {
-        if (root.cursorActive && root.focusSection === "header") ollama.toggleService()
+        if (root.cursorActive && root.focusSection === "header") {
+          if (ollama.installed && !ollama.hasService) ollama.installService()
+          else ollama.toggleService()
+        }
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -134,7 +145,7 @@ Panel {
 
             ToggleSwitch {
               id: powerSwitch
-              visible: ollama.installed
+              visible: ollama.installed && ollama.hasService
               checked: ollama.running
               busy: ollama.busy
               hasCursor: root.cursorActive && root.focusSection === "header"
@@ -148,6 +159,17 @@ Panel {
                 text: root.toggleHint
                 fontFamily: root.fontFamily
               }
+            }
+
+            PanelActionButton {
+              id: installButton
+              visible: ollama.installed && !ollama.hasService && !ollama.busy
+              iconText: "▶"
+              tooltipText: "Install and enable systemd service"
+              foreground: Color.accent
+              fontFamily: root.fontFamily
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: ollama.installService()
             }
           }
 
@@ -207,7 +229,28 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             anchors.margins: Style.space(12)
-            text: "Ollama is not installed or not on PATH."
+            text: "Ollama is not installed or not on PATH.\nInstall it from ollama.com and try again."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        // ── No service ────────────────────────────────────────────────
+        CursorSurface {
+          visible: ollama.installed && !ollama.hasService
+          width: parent.width
+          implicitHeight: noServiceText.implicitHeight + Style.spacing.rowPaddingX
+          foreground: root.foreground
+
+          Text {
+            id: noServiceText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(12)
+            text: "Ollama is installed but has no systemd service.\nClick the install button above to create and enable one."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -217,7 +260,7 @@ Panel {
 
         // ── Service details ─────────────────────────────────────────
         Column {
-          visible: ollama.installed
+          visible: ollama.installed && ollama.hasService
           width: parent.width
           spacing: Style.spacing.labelGap
 

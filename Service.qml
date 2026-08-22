@@ -9,7 +9,8 @@ Item {
   property var settings: ({})
 
   // ── State ─────────────────────────────────────────────────────────
-  property bool installed: false
+  property bool installed: false       // ollama binary on PATH
+  property bool hasService: false       // systemd unit file exists
   property bool running: false
   property bool busy: false
   property string actionLabel: ""
@@ -44,11 +45,15 @@ Item {
       if (!whichProcess.running) whichProcess.running = true
       return
     }
+    if (!hasService) {
+      if (!checkServiceProcess.running) checkServiceProcess.running = true
+      return
+    }
     if (!serviceProcess.running) serviceProcess.running = true
   }
 
   function startService() {
-    if (busy || !installed) return
+    if (busy || !installed || !hasService) return
     busy = true
     actionLabel = "Starting Ollama…"
     lastError = ""
@@ -56,7 +61,7 @@ Item {
   }
 
   function stopService() {
-    if (busy || !installed) return
+    if (busy || !installed || !hasService) return
     busy = true
     actionLabel = "Stopping Ollama…"
     lastError = ""
@@ -66,6 +71,14 @@ Item {
   function toggleService() {
     if (running) stopService()
     else startService()
+  }
+
+  function installService() {
+    if (busy || !installed || hasService) return
+    busy = true
+    actionLabel = "Installing service…"
+    lastError = ""
+    installProcess.running = true
   }
 
   // ── Parsers ────────────────────────────────────────────────────────
@@ -123,14 +136,17 @@ Item {
 
   // ── Processes ──────────────────────────────────────────────────────
 
+  // Check if ollama binary exists
   Process {
     id: whichProcess
     running: false
     command: ["which", "ollama"]
     onExited: function(exitCode) {
       root.installed = exitCode === 0
-      if (root.installed) root.refresh()
-      else {
+      if (root.installed) {
+        root.refresh()
+      } else {
+        root.hasService = false
         root.running = false
         root.models = []
         root.runningModels = []
@@ -138,6 +154,31 @@ Item {
     }
   }
 
+  // Check if systemd unit file exists
+  Process {
+    id: checkServiceProcess
+    running: false
+    command: ["systemctl", "list-unit-files", "ollama.service", "--no-legend"]
+    stdout: StdioCollector {
+      id: checkServiceStdout
+      waitForEnd: true
+      onStreamFinished: {
+        // If unit file exists, output will contain "ollama.service" on a line
+        var output = String(text || "").trim()
+        root.hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
+        if (root.hasService) {
+          root.refresh()
+        }
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.hasService = false
+      }
+    }
+  }
+
+  // systemd service state
   Process {
     id: serviceProcess
     running: false
@@ -164,6 +205,7 @@ Item {
     }
   }
 
+  // ollama list
   Process {
     id: listProcess
     running: false
@@ -175,6 +217,7 @@ Item {
     }
   }
 
+  // ollama ps (running models)
   Process {
     id: psProcess
     running: false
@@ -186,6 +229,7 @@ Item {
     }
   }
 
+  // ollama version
   Process {
     id: versionProcess
     running: false
@@ -199,6 +243,7 @@ Item {
     }
   }
 
+  // systemctl start ollama
   Process {
     id: startProcess
     running: false
@@ -207,12 +252,13 @@ Item {
       root.busy = false
       root.actionLabel = ""
       if (exitCode !== 0) {
-        root.lastError = "Failed to start Ollama (need root)"
+        root.lastError = "Failed to start Ollama"
       }
       startDelay.restart()
     }
   }
 
+  // systemctl stop ollama
   Process {
     id: stopProcess
     running: false
@@ -221,7 +267,25 @@ Item {
       root.busy = false
       root.actionLabel = ""
       if (exitCode !== 0) {
-        root.lastError = "Failed to stop Ollama (need root)"
+        root.lastError = "Failed to stop Ollama"
+      }
+      root.refresh()
+    }
+  }
+
+  // Install systemd service using ollama's built-in serve setup or manual unit creation
+  Process {
+    id: installProcess
+    running: false
+    command: ["bash", "-c", "sudo systemctl enable ollama 2>&1 || (sudo tee /etc/systemd/system/ollama.service > /dev/null << 'EOF\\n[Unit]\\nDescription=Ollama Service\\nAfter=network-online.target\\n\\n[Service]\\nExecStart=/usr/bin/ollama serve\\nWorkingDirectory=/var/lib/ollama\\nEnvironment=HOME=/var/lib/ollama\\nEnvironment=OLLAMA_MODELS=/var/lib/ollama\\nUser=ollama\\nGroup=ollama\\nRestart=on-failure\\nRestartSec=3\\nType=simple\\n\\n[Install]\\nWantedBy=multi-user.target\\nEOF\\nsudo systemctl daemon-reload && sudo systemctl enable ollama)"]
+    onExited: function(exitCode) {
+      root.busy = false
+      root.actionLabel = ""
+      if (exitCode !== 0) {
+        root.lastError = "Failed to install Ollama service"
+      } else {
+        root.hasService = true
+        root.lastError = ""
       }
       root.refresh()
     }
@@ -238,7 +302,6 @@ Item {
     onTriggered: root.refresh()
   }
 
-  // After starting the service, give it a moment before checking status
   Timer {
     id: startDelay
     interval: 1500
