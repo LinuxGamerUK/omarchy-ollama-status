@@ -80,7 +80,7 @@ BarWidget {
       Item {
         Text {
           anchors.centerIn: parent
-          text: "\u{F32A9}"
+          text: "󰚩"
           color: root.barIconColor
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.bar.iconFont

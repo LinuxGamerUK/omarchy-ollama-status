@@ -359,7 +359,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
-                    text: "\u{F32A9}"
+                    text: "󰚩"
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
