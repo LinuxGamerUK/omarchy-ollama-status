@@ -28,7 +28,7 @@ omarchy plugin add https://github.com/LinuxGamerUK/omarchy-ollama-status.git --e
 
 The panel shows:
 - Service status (running/stopped), uptime, Ollama version, and API latency
-- Currently loaded models (in VRAM) with size and processor info
+- Currently loaded models with size and processor info
 - All available (pulled) models, with a dot indicator for loaded ones
 - Cloud models (tagged `:cloud`) shown with a ☁ icon
 

@@ -19,8 +19,6 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property color hoverFill: bar ? Style.hoverFillFor(bar.foreground, Color.accent) : "transparent"
-  readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Color.accent) : "transparent"
   readonly property string statusText: {
     if (ollama.busy) return ollama.actionLabel
     if (!ollama.installed) return "Not installed"
@@ -85,9 +83,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
-        if (!root.cursorActive) { root.cursorActive = true; return }
-        if (dy !== 0) root.moveCursor(dy)
-        if (dx !== 0 && root.focusSection === "header") root.moveCursor(dx)
+        if (!root.cursorActive) root.cursorActive = true
       }
       onActivateRequested: {
         if (root.cursorActive && root.focusSection === "header") ollama.toggleService()
@@ -124,6 +120,8 @@ Panel {
 
           Text {
             id: heroIcon
+            // Nerd Font PUA glyph — must be a literal character, not a
+            // \u escape, because QML doesn't resolve private-use codepoints.
             text: "󰚩"
             color: root.statusColor
             font.family: root.fontFamily
@@ -534,10 +532,5 @@ Panel {
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
     textFormat: Text.PlainText
-  }
-
-  // Keyboard cursor movement across sections
-  function moveCursor(dy) {
-    cursorActive = true
   }
 }

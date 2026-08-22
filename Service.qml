@@ -100,10 +100,15 @@ Item {
       apiLatencyMs = -1
       return
     }
+    // Clear transient errors on a fresh successful refresh cycle
+    lastError = ""
     launch(apiHealthProcess, apiHealthWatchdog)
     launch(listProcess, listWatchdog)
     launch(psProcess, psWatchdog)
-    launch(versionProcess, versionWatchdog)
+    // Only fetch version once — it never changes during a session
+    if (ollamaVersion === "" && !versionProcess.running) {
+      launch(versionProcess, versionWatchdog)
+    }
   }
 
   function startService() {
@@ -136,7 +141,6 @@ Item {
   // own accumulation and the arrays it feeds.
 
   // systemctl show → service state
-  // Accumulates key=value lines into a bounded string, parsed on exit.
   property string _serviceBuffer: ""
   readonly property int _serviceBufferMax: 2048
 
@@ -144,8 +148,6 @@ Item {
     var s = String(line || "")
     if (_serviceBuffer.length + s.length + 1 <= _serviceBufferMax) {
       _serviceBuffer += s + "\n"
-    } else if (_serviceBuffer.length < _serviceBufferMax) {
-      _serviceBuffer = _serviceBuffer.substring(0, _serviceBufferMax)
     }
   }
 
@@ -191,7 +193,6 @@ Item {
   }
 
   // ollama list → model list
-  // Lines arrive one at a time; we push into a capped array.
   property var _listModels: []
   property bool _listHeaderSeen: false
 
@@ -247,7 +248,7 @@ Item {
     _psHeaderSeen = false
   }
 
-  // ollama --version → version string
+  // ollama --version → version string (only fetched once per session)
   function _onVersionLine(line) {
     if (ollamaVersion === "") {
       ollamaVersion = truncate(String(line || "").trim(), 128)
@@ -281,6 +282,10 @@ Item {
   }
 
   // ── Processes with SplitParser streaming + watchdog deadlines ──────
+  //
+  // onExited guards: only parse on exitCode === 0. A watchdog kill
+  // produces a non-zero exit, so partial output from a hung process is
+  // discarded rather than parsed into stale or corrupt state.
 
   Process {
     id: whichProcess
@@ -307,8 +312,9 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
-      _parseCheckBuffer()
-      if (exitCode !== 0) hasService = false
+      _checkBuffer = ""
+      if (exitCode === 0) _parseCheckBuffer()
+      else hasService = false
     }
   }
 
@@ -319,8 +325,10 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
       serviceWatchdog.stop()
-      _parseServiceBuffer()
-      if (exitCode !== 0) {
+      if (exitCode === 0) {
+        _parseServiceBuffer()
+      } else {
+        _serviceBuffer = ""
         running = false
         activeSince = ""
         apiReachable = false
@@ -335,8 +343,10 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
       apiHealthWatchdog.stop()
-      _parseApiBuffer()
-      if (exitCode !== 0) {
+      if (exitCode === 0) {
+        _parseApiBuffer()
+      } else {
+        _apiBuffer = ""
         apiReachable = false
         apiLatencyMs = -1
       }
@@ -350,7 +360,8 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onListLine(line) } }
     onExited: function(exitCode) {
       listWatchdog.stop()
-      _finishList()
+      if (exitCode === 0) _finishList()
+      else { _listModels = []; _listHeaderSeen = false }
     }
   }
 
@@ -361,7 +372,8 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onPsLine(line) } }
     onExited: function(exitCode) {
       psWatchdog.stop()
-      _finishPs()
+      if (exitCode === 0) _finishPs()
+      else { _psModels = []; _psHeaderSeen = false }
     }
   }
 
