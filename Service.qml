@@ -10,15 +10,20 @@ Item {
 
   // ── State ─────────────────────────────────────────────────────────
   property bool installed: false       // ollama binary on PATH
-  property bool hasService: false       // systemd unit file exists
+  property bool hasService: false      // systemd unit file exists
   property bool running: false
   property bool busy: false
   property string actionLabel: ""
   property string lastError: ""
 
-  // ── Model info ─────────────────────────────────────────────────────
-  property var models: []       // [{ name, id, size, modified }]
-  property var runningModels: [] // [{ name, id, size, processor, context, until }]
+  // ── API health ─────────────────────────────────────────────────────
+  property bool apiReachable: false    // / endpoint responds
+  property int apiLatencyMs: -1        // response time in ms, -1 = unknown
+
+  // ── Model info ────────────────────────────────────────────────────
+  property var models: []              // [{ name, id, size, modified, isCloud }]
+  property var runningModels: []       // [{ name, id, size, processor, context, until }]
+  property var cloudModels: []         // [{ name, family, parameterSize, capabilities }]
 
   // ── Service info ───────────────────────────────────────────────────
   property string activeSince: ""
@@ -50,6 +55,21 @@ Item {
       return
     }
     if (!serviceProcess.running) serviceProcess.running = true
+  }
+
+  function refreshApi() {
+    if (!running) {
+      apiReachable = false
+      apiLatencyMs = -1
+      return
+    }
+    if (!apiHealthProcess.running) {
+      apiLatencyMs = -1
+      apiHealthProcess.running = true
+    }
+    if (!listProcess.running) listProcess.running = true
+    if (!psProcess.running) psProcess.running = true
+    if (!versionProcess.running) versionProcess.running = true
   }
 
   function startService() {
@@ -108,9 +128,14 @@ Item {
           name: parts[0] || "",
           id: parts[1] || "",
           size: parts[2] || "",
-          modified: parts.slice(3).join("  ") || ""
+          modified: parts.slice(3).join("  ") || "",
+          isCloud: false
         })
       }
+    }
+    // Mark cloud models
+    for (var j = 0; j < result.length; j++) {
+      if (isCloudModel(result[j].name)) result[j].isCloud = true
     }
     models = result
   }
@@ -134,6 +159,33 @@ Item {
     runningModels = result
   }
 
+  function isCloudModel(name) {
+    var n = String(name || "").toLowerCase()
+    return n.indexOf(":cloud") !== -1 || n.indexOf(":server") !== -1
+  }
+
+  function parseCloudModels(raw) {
+    try {
+      var data = JSON.parse(String(raw || "{}"))
+      var models = data.models || []
+      var result = []
+      for (var i = 0; i < models.length; i++) {
+        var m = models[i]
+        var details = m.details || {}
+        result.push({
+          name: m.name || m.model || "",
+          family: details.family || "",
+          parameterSize: details.parameter_size || "",
+          capabilities: details.capabilities || [],
+          modified: m.modified_at || ""
+        })
+      }
+      return result
+    } catch (e) {
+      return []
+    }
+  }
+
   // ── Processes ──────────────────────────────────────────────────────
 
   // Check if ollama binary exists
@@ -150,6 +202,8 @@ Item {
         root.running = false
         root.models = []
         root.runningModels = []
+        root.cloudModels = []
+        root.apiReachable = false
       }
     }
   }
@@ -163,7 +217,6 @@ Item {
       id: checkServiceStdout
       waitForEnd: true
       onStreamFinished: {
-        // If unit file exists, output will contain "ollama.service" on a line
         var output = String(text || "").trim()
         root.hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
         if (root.hasService) {
@@ -188,12 +241,13 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.parseServiceStatus(text)
+        // When running, also poll API health and models
         if (root.running) {
-          if (!listProcess.running) listProcess.running = true
-          if (!psProcess.running) psProcess.running = true
-          if (!versionProcess.running) versionProcess.running = true
+          root.refreshApi()
         } else {
           root.runningModels = []
+          root.apiReachable = false
+          root.apiLatencyMs = -1
         }
       }
     }
@@ -201,11 +255,36 @@ Item {
       if (exitCode !== 0) {
         root.running = false
         root.activeSince = ""
+        root.apiReachable = false
       }
     }
   }
 
-  // ollama list
+  // API health check — curl the root endpoint and measure latency
+  Process {
+    id: apiHealthProcess
+    running: false
+    command: ["bash", "-c", "start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\""]
+    stdout: StdioCollector {
+      id: apiHealthStdout
+      waitForEnd: true
+      onStreamFinished: {
+        var parts = String(text || "").trim().split(/\s+/)
+        var code = parseInt(parts[0], 10)
+        var latency = parseInt(parts[1], 10)
+        root.apiReachable = (code === 200)
+        root.apiLatencyMs = isFinite(latency) && latency >= 0 ? latency : -1
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.apiReachable = false
+        root.apiLatencyMs = -1
+      }
+    }
+  }
+
+  // ollama list — includes cloud models tagged :cloud etc.
   Process {
     id: listProcess
     running: false
@@ -213,7 +292,67 @@ Item {
     stdout: StdioCollector {
       id: listStdout
       waitForEnd: true
-      onStreamFinished: root.parseModelList(text)
+      onStreamFinished: {
+        root.parseModelList(text)
+        // After listing local models, also fetch all models via API
+        // to discover cloud models that don't appear in `ollama list`
+        if (!apiModelsProcess.running) apiModelsProcess.running = true
+      }
+    }
+  }
+
+  // Fetch all models via API (includes cloud models)
+  Process {
+    id: apiModelsProcess
+    running: false
+    command: ["curl", "-s", "--connect-timeout", "3", "--max-time", "10", "http://127.0.0.1:11434/v1/models"]
+    stdout: StdioCollector {
+      id: apiModelsStdout
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(String(text || "{}"))
+          var apiModels = data.data || []
+          // Find models that exist in the API but not in our local list
+          var localNames = {}
+          for (var i = 0; i < root.models.length; i++) {
+            localNames[root.models[i].name] = true
+          }
+          var newCloud = []
+          for (var j = 0; j < apiModels.length; j++) {
+            var m = apiModels[j]
+            var name = String(m.id || m.name || "")
+            if (name && !localNames[name]) {
+              newCloud.push({
+                name: name,
+                id: name,
+                size: "cloud",
+                modified: m.created ? String(m.created).split("T")[0] : "",
+                isCloud: true
+              })
+            }
+          }
+          // Merge cloud-only models into the main list
+          if (newCloud.length > 0) {
+            root.models = root.models.concat(newCloud)
+          }
+          // Track cloud model details separately
+          var cloudDetails = []
+          for (var k = 0; k < apiModels.length; k++) {
+            var am = apiModels[k]
+            cloudDetails.push({
+              name: String(am.id || am.name || ""),
+              family: "",
+              parameterSize: "",
+              capabilities: [],
+              modified: am.created ? String(am.created).split("T")[0] : ""
+            })
+          }
+          root.cloudModels = cloudDetails
+        } catch (e) {
+          // API not reachable or parse error — leave cloud models empty
+        }
+      }
     }
   }
 
@@ -273,7 +412,7 @@ Item {
     }
   }
 
-  // Install systemd service using ollama's built-in serve setup or manual unit creation
+  // Install systemd service
   Process {
     id: installProcess
     running: false
@@ -302,14 +441,11 @@ Item {
     onTriggered: root.refresh()
   }
 
+  // After start, poll API once service is likely up
   Timer {
     id: startDelay
     interval: 1500
     repeat: false
     onTriggered: root.refresh()
-  }
-
-  Component.onCompleted: {
-    whichProcess.running = true
   }
 }

@@ -282,6 +282,24 @@ Panel {
             }
 
             InfoLabel {
+              visible: ollama.running
+              text: "API"
+            }
+            InfoValue {
+              visible: ollama.running
+              text: {
+                if (!ollama.apiReachable) return "—"
+                return ollama.apiLatencyMs >= 0 ? ollama.apiLatencyMs + " ms" : "Reachable"
+              }
+              color: {
+                if (!ollama.apiReachable) return root.urgent
+                if (ollama.apiLatencyMs > 500) return root.urgent
+                if (ollama.apiLatencyMs > 200) return Color.accent
+                return root.foreground
+              }
+            }
+
+            InfoLabel {
               visible: ollama.running && ollama.activeSince !== ""
               text: "Since"
             }
@@ -296,7 +314,18 @@ Panel {
             }
             InfoValue {
               visible: ollama.running
-              text: ollama.models.length + " available"
+              text: {
+                var local = 0
+                var cloud = 0
+                for (var i = 0; i < ollama.models.length; i++) {
+                  if (ollama.models[i].isCloud) cloud++
+                  else local++
+                }
+                var parts = []
+                if (local > 0) parts.push(local + " local")
+                if (cloud > 0) parts.push(cloud + " cloud")
+                return parts.length > 0 ? parts.join(" · ") : "0"
+              }
             }
           }
         }
@@ -423,12 +452,14 @@ Panel {
 
                   Text {
                     text: {
+                      if (modelData.isCloud) return "☁"
                       for (var i = 0; i < ollama.runningModels.length; i++) {
                         if (String(ollama.runningModels[i].name) === String(modelData.name)) return "●"
                       }
                       return "○"
                     }
                     color: {
+                      if (modelData.isCloud) return Color.accent
                       for (var i = 0; i < ollama.runningModels.length; i++) {
                         if (String(ollama.runningModels[i].name) === String(modelData.name)) return Color.accent
                       }
@@ -456,9 +487,10 @@ Panel {
                       Layout.fillWidth: true
                       text: {
                         var parts = []
-                        if (modelData.size) parts.push(String(modelData.size))
+                        if (modelData.isCloud) parts.push("Cloud")
+                        else if (modelData.size) parts.push(String(modelData.size))
                         if (modelData.modified) parts.push(String(modelData.modified))
-                        return parts.join(" · ")
+                        return parts.join(" \u00b7 ")
                       }
                       visible: text !== ""
                       color: root.dim
