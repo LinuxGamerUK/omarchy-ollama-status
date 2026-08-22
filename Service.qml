@@ -312,9 +312,8 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
-      _checkBuffer = ""
       if (exitCode === 0) _parseCheckBuffer()
-      else hasService = false
+      else { _checkBuffer = ""; hasService = false }
     }
   }
 
