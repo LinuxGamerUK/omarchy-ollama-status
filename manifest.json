@@ -32,5 +32,6 @@
         "defaultValue": 10
       }
     ]
-  }
+  },
+  "repository": "https://github.com/LinuxGamerUK/omarchy-ollama-status"
 }
