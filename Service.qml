@@ -20,7 +20,7 @@ Item {
   property bool apiReachable: false
   property int apiLatencyMs: -1
 
-  // ── Model info (bounded to maxModels) ──────────────────────────────
+  // ── Model info (bounded) ──────────────────────────────────────────
   readonly property int maxModels: 50
   readonly property int maxRunning: 10
   property var models: []
@@ -32,6 +32,11 @@ Item {
 
   // ── Refresh ────────────────────────────────────────────────────────
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 10, 2, 300)
+
+  // ── Process deadlines ─────────────────────────────────────────────
+  // Every process gets a watchdog that kills it after this many ms,
+  // so a hung subprocess never pins memory or blocks the panel.
+  readonly property int processDeadlineMs: 8000
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -47,7 +52,6 @@ Item {
   }
 
   // ── Sanitize external strings for safe display ──────────────────────
-  // Strip any markup-like characters so QML Text never interprets them.
   function sanitize(str) {
     return String(str || "").replace(/[<>&]/g, function(c) {
       if (c === "<") return "&lt;"
@@ -57,23 +61,37 @@ Item {
     })
   }
 
-  // Truncate a string to maxLen characters, appending "…" if truncated.
   function truncate(str, maxLen) {
     var s = String(str || "")
     if (s.length <= maxLen) return s
     return s.substring(0, maxLen) + "…"
   }
 
+  // ── Process management ──────────────────────────────────────────────
+  // Launch a process and arm its watchdog. Each process has a matching
+  // Timer that kills it after processDeadlineMs so it cannot hang.
+  function launch(process, watchdog) {
+    if (!process.running) {
+      process.running = true
+      watchdog.restart()
+    }
+  }
+
+  function reap(process, watchdog) {
+    watchdog.stop()
+    if (process.running) process.running = false
+  }
+
   function refresh() {
     if (!installed) {
-      if (!whichProcess.running) whichProcess.running = true
+      launch(whichProcess, whichWatchdog)
       return
     }
     if (!hasService) {
-      if (!checkServiceProcess.running) checkServiceProcess.running = true
+      launch(checkServiceProcess, checkServiceWatchdog)
       return
     }
-    if (!serviceProcess.running) serviceProcess.running = true
+    launch(serviceProcess, serviceWatchdog)
   }
 
   function refreshApi() {
@@ -82,13 +100,10 @@ Item {
       apiLatencyMs = -1
       return
     }
-    if (!apiHealthProcess.running) {
-      apiLatencyMs = -1
-      apiHealthProcess.running = true
-    }
-    if (!listProcess.running) listProcess.running = true
-    if (!psProcess.running) psProcess.running = true
-    if (!versionProcess.running) versionProcess.running = true
+    launch(apiHealthProcess, apiHealthWatchdog)
+    launch(listProcess, listWatchdog)
+    launch(psProcess, psWatchdog)
+    launch(versionProcess, versionWatchdog)
   }
 
   function startService() {
@@ -97,6 +112,7 @@ Item {
     actionLabel = "Starting Ollama…"
     lastError = ""
     startProcess.running = true
+    startActionWatchdog.restart()
   }
 
   function stopService() {
@@ -105,6 +121,7 @@ Item {
     actionLabel = "Stopping Ollama…"
     lastError = ""
     stopProcess.running = true
+    stopActionWatchdog.restart()
   }
 
   function toggleService() {
@@ -112,10 +129,30 @@ Item {
     else startService()
   }
 
-  // ── Parsers (bounded) ──────────────────────────────────────────────
+  // ── Streaming parsers (process line-by-line, no full buffering) ───
+  //
+  // SplitParser hands each line to onRead as it arrives, so the process
+  // output never sits in memory in its entirety.  Each parser caps its
+  // own accumulation and the arrays it feeds.
 
-  function parseServiceStatus(raw) {
-    var lines = String(raw || "").trim().split("\n").slice(0, 20)
+  // systemctl show → service state
+  // Accumulates key=value lines into a bounded string, parsed on exit.
+  property string _serviceBuffer: ""
+  readonly property int _serviceBufferMax: 2048
+
+  function _onServiceLine(line) {
+    var s = String(line || "")
+    if (_serviceBuffer.length + s.length + 1 <= _serviceBufferMax) {
+      _serviceBuffer += s + "\n"
+    } else if (_serviceBuffer.length < _serviceBufferMax) {
+      _serviceBuffer = _serviceBuffer.substring(0, _serviceBufferMax)
+    }
+  }
+
+  function _parseServiceBuffer() {
+    var raw = _serviceBuffer
+    _serviceBuffer = ""
+    var lines = raw.trim().split("\n").slice(0, 20)
     var state = ""
     var subState = ""
     var since = ""
@@ -127,47 +164,115 @@ Item {
     }
     running = (state === "active" && subState === "running")
     activeSince = since
+    if (running) refreshApi()
+    else {
+      runningModels = []
+      apiReachable = false
+      apiLatencyMs = -1
+    }
   }
 
-  function parseModelList(raw) {
-    var lines = String(raw || "").trim().split("\n")
-    var result = []
-    for (var i = 1; i < lines.length && result.length < root.maxModels; i++) {
-      var parts = lines[i].trim().split(/\s{2,}/)
-      if (parts.length >= 4) {
-        result.push({
-          name: truncate(parts[0] || "", 128),
-          id: truncate(parts[1] || "", 64),
-          size: truncate(parts[2] || "", 32),
-          modified: truncate(parts.slice(3).join("  ") || "", 64),
-          isCloud: false
-        })
-      }
+  // systemctl list-unit-files → service existence
+  property string _checkBuffer: ""
+  readonly property int _checkBufferMax: 512
+
+  function _onCheckLine(line) {
+    var s = String(line || "")
+    if (_checkBuffer.length + s.length + 1 <= _checkBufferMax) {
+      _checkBuffer += s + "\n"
     }
-    // Mark cloud models
-    for (var j = 0; j < result.length; j++) {
-      if (isCloudModel(result[j].name)) result[j].isCloud = true
-    }
-    models = result
   }
 
-  function parseRunningModels(raw) {
-    var lines = String(raw || "").trim().split("\n")
-    var result = []
-    for (var i = 1; i < lines.length && result.length < root.maxRunning; i++) {
-      var parts = lines[i].trim().split(/\s{2,}/)
-      if (parts.length >= 2) {
-        result.push({
-          name: truncate(parts[0] || "", 128),
-          id: truncate(parts[1] || "", 64),
-          size: truncate(parts[2] || "", 32),
-          processor: truncate(parts[3] || "", 32),
-          context: truncate(parts[4] || "", 32),
-          until: truncate(parts.slice(5).join("  ") || "", 64)
-        })
-      }
+  function _parseCheckBuffer() {
+    var output = truncate(_checkBuffer.trim(), 512)
+    _checkBuffer = ""
+    hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
+    if (hasService) refresh()
+  }
+
+  // ollama list → model list
+  // Lines arrive one at a time; we push into a capped array.
+  property var _listModels: []
+  property bool _listHeaderSeen: false
+
+  function _onListLine(line) {
+    if (_listModels.length >= maxModels) return
+    var s = String(line || "").trim()
+    if (s === "") return
+    if (!_listHeaderSeen) { _listHeaderSeen = true; return }
+    var parts = s.split(/\s{2,}/)
+    if (parts.length >= 4) {
+      var name = truncate(parts[0] || "", 128)
+      _listModels.push({
+        name: name,
+        id: truncate(parts[1] || "", 64),
+        size: truncate(parts[2] || "", 32),
+        modified: truncate(parts.slice(3).join("  ") || "", 64),
+        isCloud: isCloudModel(name)
+      })
     }
-    runningModels = result
+  }
+
+  function _finishList() {
+    models = _listModels
+    _listModels = []
+    _listHeaderSeen = false
+  }
+
+  // ollama ps → running models
+  property var _psModels: []
+  property bool _psHeaderSeen: false
+
+  function _onPsLine(line) {
+    if (_psModels.length >= maxRunning) return
+    var s = String(line || "").trim()
+    if (s === "") return
+    if (!_psHeaderSeen) { _psHeaderSeen = true; return }
+    var parts = s.split(/\s{2,}/)
+    if (parts.length >= 2) {
+      _psModels.push({
+        name: truncate(parts[0] || "", 128),
+        id: truncate(parts[1] || "", 64),
+        size: truncate(parts[2] || "", 32),
+        processor: truncate(parts[3] || "", 32),
+        context: truncate(parts[4] || "", 32),
+        until: truncate(parts.slice(5).join("  ") || "", 64)
+      })
+    }
+  }
+
+  function _finishPs() {
+    runningModels = _psModels
+    _psModels = []
+    _psHeaderSeen = false
+  }
+
+  // ollama --version → version string
+  function _onVersionLine(line) {
+    if (ollamaVersion === "") {
+      ollamaVersion = truncate(String(line || "").trim(), 128)
+    }
+  }
+
+  // API health → latency
+  property string _apiBuffer: ""
+  readonly property int _apiBufferMax: 128
+
+  function _onApiLine(line) {
+    var s = String(line || "")
+    if (_apiBuffer.length + s.length + 1 <= _apiBufferMax) {
+      _apiBuffer += s + "\n"
+    }
+  }
+
+  function _parseApiBuffer() {
+    var raw = truncate(_apiBuffer.trim(), 128)
+    _apiBuffer = ""
+    var parts = raw.split(/\s+/)
+    var code = parseInt(parts[0], 10)
+    var latency = parseInt(parts[1], 10)
+    apiReachable = (code === 200)
+    apiLatencyMs = isFinite(latency) && latency >= 0 ? latency : -1
   }
 
   function isCloudModel(name) {
@@ -175,22 +280,22 @@ Item {
     return n.indexOf(":cloud") !== -1 || n.indexOf(":server") !== -1
   }
 
-  // ── Processes (bounded StdioCollectors) ────────────────────────────
+  // ── Processes with SplitParser streaming + watchdog deadlines ──────
 
   Process {
     id: whichProcess
     running: false
     command: ["which", "ollama"]
     onExited: function(exitCode) {
-      root.installed = exitCode === 0
-      if (root.installed) {
-        root.refresh()
-      } else {
-        root.hasService = false
-        root.running = false
-        root.models = []
-        root.runningModels = []
-        root.apiReachable = false
+      whichWatchdog.stop()
+      installed = exitCode === 0
+      if (installed) refresh()
+      else {
+        hasService = false
+        running = false
+        models = []
+        runningModels = []
+        apiReachable = false
       }
     }
   }
@@ -199,21 +304,11 @@ Item {
     id: checkServiceProcess
     running: false
     command: ["systemctl", "list-unit-files", "ollama.service", "--no-legend"]
-    stdout: StdioCollector {
-      id: checkServiceStdout
-      waitForEnd: true
-      onStreamFinished: {
-        var output = truncate(String(text || "").trim(), 512)
-        root.hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
-        if (root.hasService) {
-          root.refresh()
-        }
-      }
-    }
+    stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.hasService = false
-      }
+      checkServiceWatchdog.stop()
+      _parseCheckBuffer()
+      if (exitCode !== 0) hasService = false
     }
   }
 
@@ -221,25 +316,14 @@ Item {
     id: serviceProcess
     running: false
     command: ["systemctl", "show", "ollama", "--property=ActiveState,SubState,ActiveEnterTimestamp"]
-    stdout: StdioCollector {
-      id: serviceStdout
-      waitForEnd: true
-      onStreamFinished: {
-        root.parseServiceStatus(truncate(text, 2048))
-        if (root.running) {
-          root.refreshApi()
-        } else {
-          root.runningModels = []
-          root.apiReachable = false
-          root.apiLatencyMs = -1
-        }
-      }
-    }
+    stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
+      serviceWatchdog.stop()
+      _parseServiceBuffer()
       if (exitCode !== 0) {
-        root.running = false
-        root.activeSince = ""
-        root.apiReachable = false
+        running = false
+        activeSince = ""
+        apiReachable = false
       }
     }
   }
@@ -248,22 +332,13 @@ Item {
     id: apiHealthProcess
     running: false
     command: ["bash", "-c", "start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\""]
-    stdout: StdioCollector {
-      id: apiHealthStdout
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = truncate(String(text || "").trim(), 128)
-        var parts = raw.split(/\s+/)
-        var code = parseInt(parts[0], 10)
-        var latency = parseInt(parts[1], 10)
-        root.apiReachable = (code === 200)
-        root.apiLatencyMs = isFinite(latency) && latency >= 0 ? latency : -1
-      }
-    }
+    stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
+      apiHealthWatchdog.stop()
+      _parseApiBuffer()
       if (exitCode !== 0) {
-        root.apiReachable = false
-        root.apiLatencyMs = -1
+        apiReachable = false
+        apiLatencyMs = -1
       }
     }
   }
@@ -272,10 +347,10 @@ Item {
     id: listProcess
     running: false
     command: ["ollama", "list"]
-    stdout: StdioCollector {
-      id: listStdout
-      waitForEnd: true
-      onStreamFinished: root.parseModelList(truncate(text, 65536))
+    stdout: SplitParser { onRead: function(line) { root._onListLine(line) } }
+    onExited: function(exitCode) {
+      listWatchdog.stop()
+      _finishList()
     }
   }
 
@@ -283,10 +358,10 @@ Item {
     id: psProcess
     running: false
     command: ["ollama", "ps"]
-    stdout: StdioCollector {
-      id: psStdout
-      waitForEnd: true
-      onStreamFinished: root.parseRunningModels(truncate(text, 16384))
+    stdout: SplitParser { onRead: function(line) { root._onPsLine(line) } }
+    onExited: function(exitCode) {
+      psWatchdog.stop()
+      _finishPs()
     }
   }
 
@@ -294,12 +369,9 @@ Item {
     id: versionProcess
     running: false
     command: ["ollama", "--version"]
-    stdout: StdioCollector {
-      id: versionStdout
-      waitForEnd: true
-      onStreamFinished: {
-        root.ollamaVersion = truncate(String(text || "").trim(), 128)
-      }
+    stdout: SplitParser { onRead: function(line) { root._onVersionLine(line) } }
+    onExited: function(exitCode) {
+      versionWatchdog.stop()
     }
   }
 
@@ -308,11 +380,10 @@ Item {
     running: false
     command: ["sudo", "systemctl", "start", "ollama"]
     onExited: function(exitCode) {
-      root.busy = false
-      root.actionLabel = ""
-      if (exitCode !== 0) {
-        root.lastError = "Failed to start Ollama"
-      }
+      startActionWatchdog.stop()
+      busy = false
+      actionLabel = ""
+      if (exitCode !== 0) lastError = "Failed to start Ollama"
       startDelay.restart()
     }
   }
@@ -322,34 +393,99 @@ Item {
     running: false
     command: ["sudo", "systemctl", "stop", "ollama"]
     onExited: function(exitCode) {
-      root.busy = false
-      root.actionLabel = ""
-      if (exitCode !== 0) {
-        root.lastError = "Failed to stop Ollama"
-      }
-      root.refresh()
+      stopActionWatchdog.stop()
+      busy = false
+      actionLabel = ""
+      if (exitCode !== 0) lastError = "Failed to stop Ollama"
+      refresh()
     }
   }
 
-  // ── Timers ─────────────────────────────────────────────────────────
+  // ── Watchdog timers — kill hung processes before they pin memory ──
+
+  Timer {
+    id: whichWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: if (whichProcess.running) whichProcess.running = false
+  }
+
+  Timer {
+    id: checkServiceWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(checkServiceProcess, checkServiceWatchdog)
+  }
+
+  Timer {
+    id: serviceWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(serviceProcess, serviceWatchdog)
+  }
+
+  Timer {
+    id: apiHealthWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(apiHealthProcess, apiHealthWatchdog)
+  }
+
+  Timer {
+    id: listWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(listProcess, listWatchdog)
+  }
+
+  Timer {
+    id: psWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(psProcess, psWatchdog)
+  }
+
+  Timer {
+    id: versionWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: reap(versionProcess, versionWatchdog)
+  }
+
+  Timer {
+    id: startActionWatchdog
+    interval: 15000  // systemctl start can take a moment
+    repeat: false
+    onTriggered: if (startProcess.running) startProcess.running = false
+  }
+
+  Timer {
+    id: stopActionWatchdog
+    interval: processDeadlineMs
+    repeat: false
+    onTriggered: if (stopProcess.running) stopProcess.running = false
+  }
+
+  // ── Refresh timers ─────────────────────────────────────────────────
 
   Timer {
     id: refreshTimer
-    interval: root.refreshIntervalSec * 1000
+    interval: refreshIntervalSec * 1000
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: refresh()
   }
 
   Timer {
     id: startDelay
     interval: 1500
     repeat: false
-    onTriggered: root.refresh()
+    onTriggered: refresh()
   }
 
   Component.onCompleted: {
     whichProcess.running = true
+    whichWatchdog.restart()
   }
 }
