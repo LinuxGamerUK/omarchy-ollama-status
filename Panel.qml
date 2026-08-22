@@ -315,6 +315,7 @@ Panel {
             InfoValue {
               visible: ollama.running
               text: {
+                if (ollama.models.length === 0) return "No local models"
                 var local = 0
                 var cloud = 0
                 for (var i = 0; i < ollama.models.length; i++) {
@@ -514,7 +515,7 @@ Panel {
         Text {
           visible: ollama.running && ollama.runningModels.length === 0
           width: parent.width
-          text: "No models currently loaded. Service is idle."
+          text: ollama.models.length === 0 ? "No local models. Cloud models accessed via API are not listed by Ollama." : "No models currently loaded. Service is idle."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
