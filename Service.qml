@@ -38,6 +38,19 @@ Item {
   // so a hung subprocess never pins memory or blocks the panel.
   readonly property int processDeadlineMs: 8000
 
+  // ── Output caps at the OS pipe level ──────────────────────────────
+  // Every command is piped through `head -c N` so the producer cannot
+  // force unbounded allocation in SplitParser's internal line buffer.
+  // `set -o pipefail` preserves the producer's exit code; SIGPIPE from
+  // head truncation yields exit 141, which our exitCode === 0 guard
+  // discards so truncated output is never parsed.
+  readonly property int capService: 2048     // systemctl show output
+  readonly property int capCheck: 512       // systemctl list-unit-files output
+  readonly property int capList: 65536      // ollama list output
+  readonly property int capPs: 16384       // ollama ps output
+  readonly property int capVersion: 256    // ollama --version output
+  readonly property int capApi: 128        // API health check output
+
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
@@ -68,8 +81,6 @@ Item {
   }
 
   // ── Process management ──────────────────────────────────────────────
-  // Launch a process and arm its watchdog. Each process has a matching
-  // Timer that kills it after processDeadlineMs so it cannot hang.
   function launch(process, watchdog) {
     if (!process.running) {
       process.running = true
@@ -134,11 +145,12 @@ Item {
     else startService()
   }
 
-  // ── Streaming parsers (process line-by-line, no full buffering) ───
+  // ── Streaming parsers ──────────────────────────────────────────────
   //
-  // SplitParser hands each line to onRead as it arrives, so the process
-  // output never sits in memory in its entirety.  Each parser caps its
-  // own accumulation and the arrays it feeds.
+  // Output is bounded at the OS pipe level by `head -c N` (see cap*
+  // properties above).  SplitParser then hands each line to onRead as it
+  // arrives.  These parsers cap their own accumulation and the arrays
+  // they feed as a second layer of defence.
 
   // systemctl show → service state
   property string _serviceBuffer: ""
@@ -281,11 +293,13 @@ Item {
     return n.indexOf(":cloud") !== -1 || n.indexOf(":server") !== -1
   }
 
-  // ── Processes with SplitParser streaming + watchdog deadlines ──────
+  // ── Processes ──────────────────────────────────────────────────────
   //
-  // onExited guards: only parse on exitCode === 0. A watchdog kill
-  // produces a non-zero exit, so partial output from a hung process is
-  // discarded rather than parsed into stale or corrupt state.
+  // Every command is wrapped in `bash -c "set -o pipefail; CMD | head -c N"`
+  // so output is bounded at the OS pipe level before SplitParser sees it.
+  // With pipefail, a SIGPIPE from head truncation yields exit 141, which
+  // the exitCode === 0 guard in onExited discards so truncated output is
+  // never parsed into state.
 
   Process {
     id: whichProcess
@@ -308,7 +322,7 @@ Item {
   Process {
     id: checkServiceProcess
     running: false
-    command: ["systemctl", "list-unit-files", "ollama.service", "--no-legend"]
+    command: ["bash", "-c", "set -o pipefail; systemctl list-unit-files ollama.service --no-legend 2>&1 | head -c " + root.capCheck]
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
@@ -320,7 +334,7 @@ Item {
   Process {
     id: serviceProcess
     running: false
-    command: ["systemctl", "show", "ollama", "--property=ActiveState,SubState,ActiveEnterTimestamp"]
+    command: ["bash", "-c", "set -o pipefail; systemctl show ollama --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
     stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
       serviceWatchdog.stop()
@@ -338,7 +352,7 @@ Item {
   Process {
     id: apiHealthProcess
     running: false
-    command: ["bash", "-c", "start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\""]
+    command: ["bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
     stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
       apiHealthWatchdog.stop()
@@ -355,7 +369,7 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: ["ollama", "list"]
+    command: ["bash", "-c", "set -o pipefail; ollama list 2>&1 | head -c " + root.capList]
     stdout: SplitParser { onRead: function(line) { root._onListLine(line) } }
     onExited: function(exitCode) {
       listWatchdog.stop()
@@ -367,7 +381,7 @@ Item {
   Process {
     id: psProcess
     running: false
-    command: ["ollama", "ps"]
+    command: ["bash", "-c", "set -o pipefail; ollama ps 2>&1 | head -c " + root.capPs]
     stdout: SplitParser { onRead: function(line) { root._onPsLine(line) } }
     onExited: function(exitCode) {
       psWatchdog.stop()
@@ -379,7 +393,7 @@ Item {
   Process {
     id: versionProcess
     running: false
-    command: ["ollama", "--version"]
+    command: ["bash", "-c", "set -o pipefail; ollama --version 2>&1 | head -c " + root.capVersion]
     stdout: SplitParser { onRead: function(line) { root._onVersionLine(line) } }
     onExited: function(exitCode) {
       versionWatchdog.stop()
@@ -465,7 +479,7 @@ Item {
 
   Timer {
     id: startActionWatchdog
-    interval: 15000  // systemctl start can take a moment
+    interval: 15000
     repeat: false
     onTriggered: if (startProcess.running) startProcess.running = false
   }
