@@ -34,9 +34,26 @@ Item {
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 10, 2, 300)
 
   // ── Process deadlines ─────────────────────────────────────────────
-  // Every process gets a watchdog that kills it after this many ms,
-  // so a hung subprocess never pins memory or blocks the panel.
-  readonly property int processDeadlineMs: 8000
+  //
+  // Two layers of deadline protection:
+  //
+  // 1. `timeout` (primary): runs each command in its own process group
+  //    and kills the entire group on expiry — no orphaned children.
+  //    `timeout -k 2 N` sends SIGTERM after N seconds, then SIGKILL 2s
+  //    later if still running. Exit code 124 (timeout) or 137 (SIGKILL)
+  //    is discarded by the exitCode === 0 guard in onExited.
+  //
+  // 2. QML watchdog (backup): if timeout itself somehow hangs, the
+  //    watchdog sets process.running = false, which calls
+  //    QProcess::terminate() on the timeout PID. This is a fallback only.
+  //
+  // The watchdog interval is set slightly above the timeout duration so
+  // timeout (which handles the process group) always fires first.
+
+  readonly property int processTimeoutSec: 8       // timeout duration for regular commands
+  readonly property int startTimeoutSec: 15        // systemctl start can be slow
+  readonly property int watchdogMs: 12000          // backup watchdog for regular commands
+  readonly property int startWatchdogMs: 20000     // backup watchdog for start
 
   // ── Output caps at the OS pipe level ──────────────────────────────
   // Every command is piped through `head -c N` so the producer cannot
@@ -295,15 +312,20 @@ Item {
 
   // ── Processes ──────────────────────────────────────────────────────
   //
-  // Every command is wrapped in `bash -c "set -o pipefail; CMD | head -c N"`
-  // so output is bounded at the OS pipe level before SplitParser sees it.
-  // With pipefail, a SIGPIPE from head truncation yields exit 141, which
-  // the exitCode === 0 guard in onExited discards so truncated output is
-  // never parsed into state.
+  // Every command is wrapped in `timeout -k 2 N` which runs the command
+  // in its own process group and kills the entire group on expiry,
+  // preventing orphaned children.  Inside timeout, commands are further
+  // wrapped in `bash -c "set -o pipefail; CMD 2>&1 | head -c N"` to bound
+  // output at the OS pipe level before SplitParser sees it.
+  //
+  // With pipefail, SIGPIPE from head truncation yields exit 141.
+  // timeout expiry yields exit 124 (TERM) or 137 (KILL).
+  // All non-zero exits are discarded by the exitCode === 0 guard.
 
   Process {
     id: whichProcess
     running: false
+    // which has no children and no stdout handler — timeout not needed
     command: ["which", "ollama"]
     onExited: function(exitCode) {
       whichWatchdog.stop()
@@ -322,7 +344,8 @@ Item {
   Process {
     id: checkServiceProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; systemctl list-unit-files ollama.service --no-legend 2>&1 | head -c " + root.capCheck]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; systemctl list-unit-files ollama.service --no-legend 2>&1 | head -c " + root.capCheck]
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
@@ -334,7 +357,8 @@ Item {
   Process {
     id: serviceProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; systemctl show ollama --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; systemctl show ollama --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
     stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
       serviceWatchdog.stop()
@@ -352,7 +376,8 @@ Item {
   Process {
     id: apiHealthProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
     stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
       apiHealthWatchdog.stop()
@@ -369,7 +394,8 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; ollama list 2>&1 | head -c " + root.capList]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; ollama list 2>&1 | head -c " + root.capList]
     stdout: SplitParser { onRead: function(line) { root._onListLine(line) } }
     onExited: function(exitCode) {
       listWatchdog.stop()
@@ -381,7 +407,8 @@ Item {
   Process {
     id: psProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; ollama ps 2>&1 | head -c " + root.capPs]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; ollama ps 2>&1 | head -c " + root.capPs]
     stdout: SplitParser { onRead: function(line) { root._onPsLine(line) } }
     onExited: function(exitCode) {
       psWatchdog.stop()
@@ -393,7 +420,8 @@ Item {
   Process {
     id: versionProcess
     running: false
-    command: ["bash", "-c", "set -o pipefail; ollama --version 2>&1 | head -c " + root.capVersion]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "set -o pipefail; ollama --version 2>&1 | head -c " + root.capVersion]
     stdout: SplitParser { onRead: function(line) { root._onVersionLine(line) } }
     onExited: function(exitCode) {
       versionWatchdog.stop()
@@ -403,7 +431,8 @@ Item {
   Process {
     id: startProcess
     running: false
-    command: ["sudo", "systemctl", "start", "ollama"]
+    command: ["timeout", "-k", "2", "" + startTimeoutSec,
+              "sudo", "systemctl", "start", "ollama"]
     onExited: function(exitCode) {
       startActionWatchdog.stop()
       busy = false
@@ -416,7 +445,8 @@ Item {
   Process {
     id: stopProcess
     running: false
-    command: ["sudo", "systemctl", "stop", "ollama"]
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "sudo", "systemctl", "stop", "ollama"]
     onExited: function(exitCode) {
       stopActionWatchdog.stop()
       busy = false
@@ -426,67 +456,70 @@ Item {
     }
   }
 
-  // ── Watchdog timers — kill hung processes before they pin memory ──
+  // ── Watchdog timers (backup layer) ────────────────────────────────
+  // These fire slightly after the `timeout` deadline so timeout (which
+  // handles the process group) is the primary killer.  If timeout
+  // itself hangs, the watchdog falls back to QProcess::terminate().
 
   Timer {
     id: whichWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: if (whichProcess.running) whichProcess.running = false
   }
 
   Timer {
     id: checkServiceWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(checkServiceProcess, checkServiceWatchdog)
   }
 
   Timer {
     id: serviceWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(serviceProcess, serviceWatchdog)
   }
 
   Timer {
     id: apiHealthWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(apiHealthProcess, apiHealthWatchdog)
   }
 
   Timer {
     id: listWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(listProcess, listWatchdog)
   }
 
   Timer {
     id: psWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(psProcess, psWatchdog)
   }
 
   Timer {
     id: versionWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: reap(versionProcess, versionWatchdog)
   }
 
   Timer {
     id: startActionWatchdog
-    interval: 15000
+    interval: startWatchdogMs
     repeat: false
     onTriggered: if (startProcess.running) startProcess.running = false
   }
 
   Timer {
     id: stopActionWatchdog
-    interval: processDeadlineMs
+    interval: watchdogMs
     repeat: false
     onTriggered: if (stopProcess.running) stopProcess.running = false
   }
