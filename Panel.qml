@@ -126,6 +126,7 @@ Panel {
             color: root.statusColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
+            textFormat: Text.PlainText
             opacity: ollama.installed ? 1.0 : 0.5
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -183,6 +184,7 @@ Panel {
               font.pixelSize: Style.font.caption
               font.bold: true
               font.letterSpacing: 1.2
+              textFormat: Text.PlainText
               elide: Text.ElideRight
             }
           }
@@ -361,6 +363,7 @@ Panel {
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
+                    textFormat: Text.PlainText
                     Layout.alignment: Qt.AlignVCenter
                   }
 
@@ -456,6 +459,7 @@ Panel {
                     }
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
+                    textFormat: Text.PlainText
                     Layout.alignment: Qt.AlignVCenter
                   }
 
