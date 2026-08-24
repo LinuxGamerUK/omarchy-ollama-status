@@ -462,9 +462,8 @@ Item {
     id: startProcess
     running: false
     command: ["timeout", "-k", "2", "" + startTimeoutSec,
-              "sudo", "systemctl", "start", "ollama"]
+              "bash", "-c", "set -o pipefail; sudo systemctl start ollama 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStartLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root._onStartLine(line) } }
     onExited: function(exitCode) {
       startActionWatchdog.stop()
       busy = false
@@ -480,9 +479,8 @@ Item {
     id: stopProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "sudo", "systemctl", "stop", "ollama"]
+              "bash", "-c", "set -o pipefail; sudo systemctl stop ollama 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStopLine(line) } }
-    stderr: SplitParser { onRead: function(line) { root._onStopLine(line) } }
     onExited: function(exitCode) {
       stopActionWatchdog.stop()
       busy = false
