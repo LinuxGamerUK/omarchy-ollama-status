@@ -32,6 +32,25 @@ The panel shows:
 - All available (pulled) models, with a dot indicator for loaded ones
 - Cloud models (tagged `:cloud`) shown with a ☁ icon
 
+## Enable start/stop control (one-time)
+
+**Required for the toggle to work.** The Omarchy shell runs commands without
+a terminal, so `sudo` can never prompt for a password — start/stop fails with
+"passwordless sudo is not set up" until you allow passwordless control of the
+Ollama service once:
+
+```sh
+sudo tee /etc/sudoers.d/ollama-status >/dev/null <<'EOF'
+# Omarchy shell plugin: Ollama Status (com.github.linuxgameruk.ollama-status)
+%wheel ALL=(root) NOPASSWD: /usr/bin/systemctl start ollama, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama, /usr/bin/systemctl stop ollama.service
+EOF
+sudo chmod 440 /etc/sudoers.d/ollama-status
+```
+
+This lets `wheel` group members run **exactly** `systemctl start ollama` /
+`systemctl stop ollama` as root — nothing else. No reboot needed; the next
+toggle just works.
+
 ## Service setup
 
 If Ollama is installed but the systemd service is missing, the panel shows setup instructions. To create and enable the service manually:
@@ -61,7 +80,8 @@ omarchy plugin remove com.github.linuxgameruk.ollama-status
 ## Requirements
 
 - [Ollama](https://ollama.com) installed and on PATH
-- systemd `ollama.service` for start/stop control (uses `sudo` for privilege escalation)
+- systemd `ollama.service` for start/stop control
+- The passwordless sudo rule from *Enable start/stop control* above (without it the toggle cannot work — sudo has no terminal to ask for a password)
 
 ## License
 

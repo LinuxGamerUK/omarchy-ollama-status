@@ -67,6 +67,7 @@ Item {
   readonly property int capPs: 16384       // ollama ps output
   readonly property int capVersion: 256    // ollama --version output
   readonly property int capApi: 128        // API health check output
+  readonly property int capAction: 512     // start/stop stderr capture
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -95,6 +96,21 @@ Item {
     var s = String(str || "")
     if (s.length <= maxLen) return s
     return s.substring(0, maxLen) + "…"
+  }
+
+  // Classify a start/stop failure into an actionable message.
+  //
+  // Quickshell processes have no TTY, so `sudo systemctl …` fails outright
+  // unless a NOPASSWD sudoers rule covers it — the most common setup issue.
+  // Detect that case specifically and point the user at the README instead
+  // of surfacing a bare command failure.
+  function _actionError(output, verb) {
+    var s = String(output || "").trim()
+    if (/password is required|askpass|terminal is required/i.test(s)) {
+      return "Cannot " + verb + " Ollama: passwordless sudo is not set up for systemctl.\n" +
+             "One-time fix in the README under \u201cEnable start/stop control\u201d."
+    }
+    return "Failed to " + verb + " Ollama" + (s !== "" ? ": " + truncate(s, 160) : "")
   }
 
   // ── Process management ──────────────────────────────────────────────
@@ -428,16 +444,34 @@ Item {
     }
   }
 
+  // ── Start/stop stderr capture ──────────────────────────────────────
+  property string _startBuffer: ""
+  property string _stopBuffer: ""
+
+  function _onStartLine(line) {
+    var s = String(line || "")
+    if (_startBuffer.length + s.length + 1 <= capAction) _startBuffer += s + "\n"
+  }
+
+  function _onStopLine(line) {
+    var s = String(line || "")
+    if (_stopBuffer.length + s.length + 1 <= capAction) _stopBuffer += s + "\n"
+  }
+
   Process {
     id: startProcess
     running: false
     command: ["timeout", "-k", "2", "" + startTimeoutSec,
               "sudo", "systemctl", "start", "ollama"]
+    stdout: SplitParser { onRead: function(line) { root._onStartLine(line) } }
+    stderr: SplitParser { onRead: function(line) { root._onStartLine(line) } }
     onExited: function(exitCode) {
       startActionWatchdog.stop()
       busy = false
       actionLabel = ""
-      if (exitCode !== 0) lastError = "Failed to start Ollama"
+      if (exitCode !== 0) lastError = _actionError(_startBuffer, "start")
+      else lastError = ""
+      _startBuffer = ""
       startDelay.restart()
     }
   }
@@ -447,11 +481,15 @@ Item {
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
               "sudo", "systemctl", "stop", "ollama"]
+    stdout: SplitParser { onRead: function(line) { root._onStopLine(line) } }
+    stderr: SplitParser { onRead: function(line) { root._onStopLine(line) } }
     onExited: function(exitCode) {
       stopActionWatchdog.stop()
       busy = false
       actionLabel = ""
-      if (exitCode !== 0) lastError = "Failed to stop Ollama"
+      if (exitCode !== 0) lastError = _actionError(_stopBuffer, "stop")
+      else lastError = ""
+      _stopBuffer = ""
       refresh()
     }
   }
