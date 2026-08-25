@@ -100,15 +100,21 @@ Item {
 
   // Classify a start/stop failure into an actionable message.
   //
-  // Quickshell processes have no TTY, so `sudo systemctl …` fails outright
-  // unless a NOPASSWD sudoers rule covers it — the most common setup issue.
-  // Detect that case specifically and point the user at the README instead
-  // of surfacing a bare command failure.
+  // Start/stop goes through `pkexec /usr/bin/systemctl …`, which shows a graphical
+  // polkit prompt (Omarchy ships a polkit agent inside omarchy-shell).
+  // Detect the common failure modes — cancelled prompt, no polkit agent,
+  // explicit denial — and surface actionable text instead of raw output.
   function _actionError(output, verb) {
     var s = String(output || "").trim()
-    if (/password is required|askpass|terminal is required/i.test(s)) {
-      return "Cannot " + verb + " Ollama: passwordless sudo is not set up for systemctl.\n" +
-             "One-time fix in the README under \u201cEnable start/stop control\u201d."
+    if (/request dismissed|dismissed by user|was not shown|cancelled|canceled/i.test(s)) {
+      return (verb === "start" ? "Start": "Stop") + " cancelled — authentication was dismissed."
+    }
+    if (/not authorized|permission denied|access denied/i.test(s)) {
+      return "Cannot " + verb + " Ollama: you are not authorized to manage system services."
+    }
+    if (/no authentication agent|error creating textual authentication agent/i.test(s)) {
+      return "Cannot " + verb + " Ollama: no polkit authentication agent found.\n" +
+             "Make sure the Polkit plugin is enabled in omarchy-shell settings."
     }
     return "Failed to " + verb + " Ollama" + (s !== "" ? ": " + truncate(s, 160) : "")
   }
@@ -462,7 +468,7 @@ Item {
     id: startProcess
     running: false
     command: ["timeout", "-k", "2", "" + startTimeoutSec,
-              "bash", "-c", "set -o pipefail; sudo systemctl start ollama 2>&1 | head -c " + root.capAction]
+              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl start ollama 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStartLine(line) } }
     onExited: function(exitCode) {
       startActionWatchdog.stop()
@@ -479,7 +485,7 @@ Item {
     id: stopProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; sudo systemctl stop ollama 2>&1 | head -c " + root.capAction]
+              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl stop ollama 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStopLine(line) } }
     onExited: function(exitCode) {
       stopActionWatchdog.stop()

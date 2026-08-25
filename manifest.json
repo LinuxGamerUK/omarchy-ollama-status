@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.github.linuxgameruk.ollama-status",
   "name": "Ollama Status",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "LinuxGamerUK",
   "license": "MIT",
   "description": "Control the Ollama service from the Omarchy bar. Start and stop the systemd service, see loaded models and processor info, and reclaim resources when gaming.",
