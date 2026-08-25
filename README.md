@@ -1,5 +1,7 @@
 # Ollama Status
 
+![Ollama Status plugin](assets/screenshot.png)
+
 An Omarchy shell bar widget that shows the Ollama service status and lets you start or stop it from the bar — handy for freeing GPU memory when gaming or doing other GPU-intensive work.
 
 ## Features
