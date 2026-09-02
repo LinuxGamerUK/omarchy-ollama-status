@@ -16,6 +16,10 @@ Panel {
   property var hostWidget: null
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property bool foregroundIsLight: (0.299 * foreground.r + 0.587 * foreground.g + 0.114 * foreground.b) > 0.5
+  readonly property url iconSource: foregroundIsLight
+    ? Qt.resolvedUrl("assets/ollama-white.svg")
+    : Qt.resolvedUrl("assets/ollama-black.svg")
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -118,15 +122,15 @@ Panel {
           width: parent.width
           implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroActions.implicitHeight)
 
-          Text {
+          Image {
             id: heroIcon
-            // Nerd Font PUA glyph — must be a literal character, not a
-            // \u escape, because QML doesn't resolve private-use codepoints.
-            text: "󰚩"
-            color: root.statusColor
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.display
-            textFormat: Text.PlainText
+            source: root.iconSource
+            fillMode: Image.PreserveAspectFit
+            width: Style.font.display
+            height: Style.font.display
+            sourceSize.width: Style.font.display * 2
+            sourceSize.height: Style.font.display * 2
+            smooth: true
             opacity: ollama.installed ? 1.0 : 0.5
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -359,7 +363,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
-                    text: "󰚩"
+                    text: "●"
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
