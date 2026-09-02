@@ -47,12 +47,17 @@ BarWidget {
     settings: root.settings
   }
 
-  readonly property color barIconColor: {
-    if (!ollama.installed || !ollama.hasService)
-      return bar ? Qt.darker(bar.barForeground, 2.0) : Qt.darker(Color.foreground, 2.0)
-    if (ollama.running)
-      return bar ? bar.barForeground : Color.foreground
-    return bar ? Qt.darker(bar.barForeground, 1.55) : Qt.darker(Color.foreground, 1.55)
+  readonly property color barIconColor: bar ? bar.barForeground : Color.foreground
+
+  readonly property bool foregroundIsLight: (0.299 * barIconColor.r + 0.587 * barIconColor.g + 0.114 * barIconColor.b) > 0.5
+  readonly property url iconSource: foregroundIsLight
+    ? Qt.resolvedUrl("assets/ollama-white.svg")
+    : Qt.resolvedUrl("assets/ollama-black.svg")
+
+  readonly property real iconOpacity: {
+    if (!ollama.installed || !ollama.hasService) return 0.35
+    if (ollama.running) return 1.0
+    return 0.6
   }
 
   Loader {
@@ -78,16 +83,18 @@ BarWidget {
     }
     iconComponent: Component {
       Item {
-        Text {
+        Image {
           anchors.centerIn: parent
-          text: "󰚩"
-          color: root.barIconColor
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.bar.iconFont
-          renderType: Text.NativeRendering
-          textFormat: Text.PlainText
+          width: Style.bar.iconFont
+          height: Style.bar.iconFont
+          source: root.iconSource
+          fillMode: Image.PreserveAspectFit
+          sourceSize.width: Style.bar.iconFont * 2
+          sourceSize.height: Style.bar.iconFont * 2
+          smooth: true
+          opacity: root.iconOpacity
 
-          Behavior on color { ColorAnimation { duration: 240 } }
+          Behavior on opacity { NumberAnimation { duration: 240 } }
         }
       }
     }
